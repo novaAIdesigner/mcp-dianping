@@ -1,18 +1,26 @@
 from mcp.server.fastmcp import FastMCP
 from playwright.sync_api import sync_playwright
+from pathlib import Path
+import os
 
 mcp = FastMCP("DianpingMCP")
 
-# 全局浏览器实例，便于手工处理登录
+# Global instances
 _browser = None
+_context = None
 
 def get_browser():
-    global _browser
+    """Get or create a browser instance with anti-automation features disabled"""
+    global _browser, _context
+    
     if _browser is None:
         p = sync_playwright().start()
-        _browser = p.chromium.launch(headless=False)  # 非headless，便于人工登录
+        _browser = p.chromium.launch(
+            headless=True,
+            args=['--disable-blink-features=AutomationControlled']
+        )
+        
     return _browser
-
 # 加载分类菜单（dianping-menu.txt），返回dict: {分类名: url}
 def load_menu(filepath="dianping-menu.txt"):
     menu = {}
@@ -61,6 +69,96 @@ def load_regions(filepath="dianping-region.txt"):
 MENU = load_menu()
 REGIONS = load_regions()
 
+def get_context():
+    """Get authenticated context from auth.json or return None if login required"""
+    auth_file = Path("auth.json")
+    if not auth_file.exists():
+        return None
+        
+    try:
+        browser = get_browser()
+        context = browser.new_context(storage_state=str(auth_file))
+        
+        # Create test page with anti-detection headers
+        page = context.new_page()
+        page.set_extra_http_headers({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        
+        # Test login status
+        print("Verifying login status...")
+        page.goto('https://www.dianping.com/beijing', wait_until='domcontentloaded')
+        page.wait_for_selector('.top-nav', state='visible', timeout=30000)
+        
+        # Check for login link
+        login_link = page.locator('.login-container a[href*="account.dianping.com/login"]')
+        if login_link.is_visible():
+            print("Login required")
+            page.close()
+            return None
+            
+        # Verify user container exists
+        try:
+            page.wait_for_selector('div.user-container', state='visible', timeout=10000)
+            page.wait_for_selector('p.nick-name', state='visible', timeout=10000)
+            print("Login verified")
+            page.close()
+            return context
+        except Exception:
+            print("Login verification failed")
+            page.close()
+            return None
+            
+    except Exception as e:
+        print(f"Error loading auth context: {e}")
+        return None
+
+def get_page(url: str = 'https://www.dianping.com/beijing'):
+    """Get an authenticated page with anti-detection settings
+    
+    Args:
+        url: Page URL to load (default: Beijing homepage)
+        
+    Returns:
+        tuple: (context, page) if authenticated, (None, None) if login required
+    """
+    auth_file = Path("auth.json")
+    if not auth_file.exists():
+        return None, None
+        
+    try:
+        browser = get_browser()
+        context = browser.new_context(storage_state=str(auth_file))
+        page = context.new_page()
+        
+        # Set anti-detection headers
+        page.set_extra_http_headers({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        
+        # Load and verify login status
+        page.goto(url, wait_until='domcontentloaded')
+        page.wait_for_selector('.top-nav', state='visible', timeout=30000)
+        
+        # Check login state
+        login_link = page.locator('.login-container a[href*="account.dianping.com/login"]')
+        if login_link.is_visible():
+            page.close()
+            return None, None
+            
+        # Verify user profile
+        try:
+            page.wait_for_selector('div.user-container', state='visible', timeout=10000)
+            page.wait_for_selector('p.nick-name', state='visible', timeout=10000)
+            return context, page
+        except Exception:
+            page.close()
+            return None, None
+            
+    except Exception as e:
+        return None, None
+
+# Update tool functions to use get_page()
 @mcp.tool()
 def dianping_category_rank(city: str, category: str, region: str = "", sort: str = "") -> dict:
     """
@@ -90,7 +188,8 @@ def dianping_category_rank(city: str, category: str, region: str = "", sort: str
     返回:
         分类排行列表，每项包含shop_id、名称、评分、评论数、地址、均价、推荐菜
     """
-     # 验证输入
+    # Validate inputs and build URL
+    # 验证输入
     if category not in MENU:
         return {"success": False, "error": f"分类'{category}'不在菜单中"}
     
@@ -113,57 +212,58 @@ def dianping_category_rank(city: str, category: str, region: str = "", sort: str
     if sort:
         base_url += sort
 
-    # ... 原有的页面抓取代码保持不变 ...
-    browser = get_browser()
-    page = browser.new_page()
-    page.goto(base_url, timeout=60000)
+    # Get authenticated page
+    context, page = get_page(base_url)
+    if not context:
+        return {"success": False, "error": "需要登录并上传auth.json"}
     
-
     try:
-        page.wait_for_selector('.shop-all-list', timeout=10000)
-    except Exception:
+        try:
+            page.wait_for_selector('.shop-all-list', timeout=10000)
+        except Exception:
+            page.close()
+            return {"success": False, "error": "页面加载失败或需要登录"}
+        items = []
+        for shop in page.query_selector_all('.shop-all-list ul li'):
+            name = shop.query_selector('.tit a h4').inner_text() if shop.query_selector('.tit a h4') else ""
+            href = shop.query_selector('.tit a').get_attribute('href') if shop.query_selector('.tit a') else ""
+            shop_id = ""
+            if href:
+                parts = href.split("/")
+                if "shop" in parts:
+                    idx = parts.index("shop")
+                    if idx + 1 < len(parts):
+                        shop_id = parts[idx + 1]
+            star = shop.query_selector('.nebula_star .star_icon span')
+            rating = star.get_attribute('class') if star else ""
+            review_count = shop.query_selector('.review-num b').inner_text() if shop.query_selector('.review-num b') else ""
+            address = ""
+            addr_tag = shop.query_selector('.tag-addr')
+            if addr_tag:
+                addr_spans = addr_tag.query_selector_all('a span.tag')
+                address = " ".join([span.inner_text() for span in addr_spans]) if addr_spans else ""
+            img = shop.query_selector('.pic img')
+            img_url = img.get_attribute('src') if img else ""
+            price = shop.query_selector('.mean-price b').inner_text() if shop.query_selector('.mean-price b') else ""
+            recommend = []
+            recommend_tag = shop.query_selector('.recommend')
+            if recommend_tag:
+                recommend_links = recommend_tag.query_selector_all('a.recommend-click')
+                recommend = [a.inner_text() for a in recommend_links] if recommend_links else []
+            items.append({
+                "shop_id": shop_id,
+                "name": name,
+                "rating": rating,
+                "review_count": review_count,
+                "address": address,
+                "url": f"https://www.dianping.com{href}" if href and href.startswith('/') else href,
+                "img": img_url,
+                "price": price,
+                "recommend": recommend
+            })
+        return {"success": True, "city": city, "category": category, "region": region, "result": items}
+    finally:
         page.close()
-        return {"success": False, "error": "页面加载失败或需要登录"}
-    items = []
-    for shop in page.query_selector_all('.shop-all-list ul li'):
-        name = shop.query_selector('.tit a h4').inner_text() if shop.query_selector('.tit a h4') else ""
-        href = shop.query_selector('.tit a').get_attribute('href') if shop.query_selector('.tit a') else ""
-        shop_id = ""
-        if href:
-            parts = href.split("/")
-            if "shop" in parts:
-                idx = parts.index("shop")
-                if idx + 1 < len(parts):
-                    shop_id = parts[idx + 1]
-        star = shop.query_selector('.nebula_star .star_icon span')
-        rating = star.get_attribute('class') if star else ""
-        review_count = shop.query_selector('.review-num b').inner_text() if shop.query_selector('.review-num b') else ""
-        address = ""
-        addr_tag = shop.query_selector('.tag-addr')
-        if addr_tag:
-            addr_spans = addr_tag.query_selector_all('a span.tag')
-            address = " ".join([span.inner_text() for span in addr_spans]) if addr_spans else ""
-        img = shop.query_selector('.pic img')
-        img_url = img.get_attribute('src') if img else ""
-        price = shop.query_selector('.mean-price b').inner_text() if shop.query_selector('.mean-price b') else ""
-        recommend = []
-        recommend_tag = shop.query_selector('.recommend')
-        if recommend_tag:
-            recommend_links = recommend_tag.query_selector_all('a.recommend-click')
-            recommend = [a.inner_text() for a in recommend_links] if recommend_links else []
-        items.append({
-            "shop_id": shop_id,
-            "name": name,
-            "rating": rating,
-            "review_count": review_count,
-            "address": address,
-            "url": f"https://www.dianping.com{href}" if href and href.startswith('/') else href,
-            "img": img_url,
-            "price": price,
-            "recommend": recommend
-        })
-    page.close()
-    return {"success": True, "city": city, "category": category, "region": region, "result": items}
 
 @mcp.tool()
 def dianping_shop_detail(shop_id: str) -> dict:
@@ -177,56 +277,60 @@ def dianping_shop_detail(shop_id: str) -> dict:
         店铺详情包含名称、评分、地址、电话、简介、推荐、团购、评价。
     """
     url = f"https://www.dianping.com/shop/{shop_id}"
-    browser = get_browser()
-    page = browser.new_page()
-    page.goto(url, timeout=60000)
+    
+    # Get authenticated page
+    context, page = get_page(url)
+    if not context:
+        return {"success": False, "error": "需要登录并上传auth.json"}
+    
     try:
-        page.wait_for_selector('.shopName', timeout=10000)
-    except Exception:
-        page.close()
-        return {"success": False, "error": "页面加载失败或需要登录"}
+        try:
+            page.wait_for_selector('.shopName', timeout=10000)
+        except Exception:
+            page.close()
+            return {"success": False, "error": "页面加载失败或需要登录"}
 
-    # 店名
-    name = page.query_selector('.shopName').inner_text() if page.query_selector('.shopName') else ""
+        # 店名
+        name = page.query_selector('.shopName').inner_text() if page.query_selector('.shopName') else ""
 
-    # 评分和评价数 
-    rating = page.query_selector('.star-score').inner_text() if page.query_selector('.star-score') else ""
-    review_count = page.query_selector('.reviews').inner_text() if page.query_selector('.reviews') else ""
+        # 评分和评价数 
+        rating = page.query_selector('.star-score').inner_text() if page.query_selector('.star-score') else ""
+        review_count = page.query_selector('.reviews').inner_text() if page.query_selector('.reviews') else ""
 
-    # 人均价格
-    price = page.query_selector('.price').inner_text() if page.query_selector('.price') else ""
+        # 人均价格
+        price = page.query_selector('.price').inner_text() if page.query_selector('.price') else ""
 
-    # 地区和分类
-    region = page.query_selector('.region').inner_text() if page.query_selector('.region') else ""
-    category = page.query_selector('.category').inner_text() if page.query_selector('.category') else ""
+        # 地区和分类
+        region = page.query_selector('.region').inner_text() if page.query_selector('.region') else ""
+        category = page.query_selector('.category').inner_text() if page.query_selector('.category') else ""
 
-    # 细分评分
-    score_text = page.query_selector('.scoreText').inner_text() if page.query_selector('.scoreText') else ""
+        # 细分评分
+        score_text = page.query_selector('.scoreText').inner_text() if page.query_selector('.scoreText') else ""
 
-    # 地址 
-    address = page.query_selector('.addressText').inner_text() if page.query_selector('.addressText') else ""
-    address_desc = page.query_selector('.desc-addr-txt').inner_text() if page.query_selector('.desc-addr-txt') else ""
+        # 地址 
+        address = page.query_selector('.addressText').inner_text() if page.query_selector('.addressText') else ""
+        address_desc = page.query_selector('.desc-addr-txt').inner_text() if page.query_selector('.desc-addr-txt') else ""
 
-    # 营业时间和标签
-    biz_info = ""
-    biz_tag = page.query_selector('.biz-txt')
-    biz_time = page.query_selector('.biz-time')
-    if biz_tag and biz_time:
-        biz_info = f"{biz_tag.inner_text()} {biz_time.inner_text()}"
+        # 营业时间和标签
+        biz_info = ""
+        biz_tag = page.query_selector('.biz-txt')
+        biz_time = page.query_selector('.biz-time')
+        if biz_tag and biz_time:
+            biz_info = f"{biz_tag.inner_text()} {biz_time.inner_text()}"
 
-    # 特色标签
-    tags = []
-    for tag in page.query_selector_all('.feature-txt'):
-        tags.append(tag.inner_text())
+        # 特色标签
+        tags = []
+        for tag in page.query_selector_all('.feature-txt'):
+            tags.append(tag.inner_text())
 
-    # 推荐菜
-    recommend_dishes = []
-    dishes = page.query_selector_all('.food')
-    for dish in dishes:
-        recommend_dishes.append(dish.inner_text())
+        # 推荐菜
+        recommend_dishes = []
+        dishes = page.query_selector_all('.food')
+        for dish in dishes:
+            recommend_dishes.append(dish.inner_text())
 
-    # 生成Markdown格式文本
-    md = f"""# {name}
+        # 生成Markdown格式文本
+        md = f"""# {name}
 
 **评分**: {rating} ({review_count})  
 **人均**: {price}  
@@ -244,17 +348,25 @@ def dianping_shop_detail(shop_id: str) -> dict:
 {', '.join(recommend_dishes)}
 """
 
-    page.close()
-    return {
-        "success": True, 
-        "shop_id": shop_id,
-        "name": name,
-        "rating": rating,
-        "review_count": review_count,
-        "price": price,
-        "address": address,
-        "md": md
-    }
+        return {
+            "success": True, 
+            "shop_id": shop_id,
+            "name": name,
+            "rating": rating,
+            "review_count": review_count,
+            "price": price,
+            "address": address,
+            "md": md
+        }
+    finally:
+        page.close()
 
 if __name__ == "__main__":
+    # Check login status on startup
+    context, page = get_page()
+    if page:
+        print("Authentication verified successfully")
+        page.close()
+    else:
+        print("Error: 需要登录并上传auth.json")
     mcp.run(transport="stdio")

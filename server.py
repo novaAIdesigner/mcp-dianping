@@ -85,29 +85,7 @@ def get_context():
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         
-        # Test login status
-        print("Verifying login status...")
-        page.goto('https://www.dianping.com/beijing', wait_until='domcontentloaded')
-        page.wait_for_selector('.top-nav', state='visible', timeout=30000)
-        
-        # Check for login link
-        login_link = page.locator('.login-container a[href*="account.dianping.com/login"]')
-        if login_link.is_visible():
-            print("Login required")
-            page.close()
-            return None
-            
-        # Verify user container exists
-        try:
-            page.wait_for_selector('div.user-container', state='visible', timeout=10000)
-            page.wait_for_selector('p.nick-name', state='visible', timeout=10000)
-            print("Login verified")
-            page.close()
-            return context
-        except Exception:
-            print("Login verification failed")
-            page.close()
-            return None
+        return context
             
     except Exception as e:
         print(f"Error loading auth context: {e}")
@@ -138,18 +116,14 @@ def get_page(url: str = 'https://www.dianping.com/beijing'):
         
         # Load and verify login status
         page.goto(url, wait_until='domcontentloaded')
-        page.wait_for_selector('.top-nav', state='visible', timeout=30000)
-        
-        # Check login state
-        login_link = page.locator('.login-container a[href*="account.dianping.com/login"]')
-        if login_link.is_visible():
-            page.close()
-            return None, None
-            
+                    
         # Verify user profile
         try:
-            page.wait_for_selector('div.user-container', state='visible', timeout=10000)
-            page.wait_for_selector('p.nick-name', state='visible', timeout=10000)
+            # Get and verify nickname using correct selectors
+            username_element = page.wait_for_selector('.userinfo-container .username', state='visible', timeout=10000)
+            username = username_element.text_content().strip()
+            if not username:
+                raise Exception("Username is empty, login may be required")
             return context, page
         except Exception:
             page.close()

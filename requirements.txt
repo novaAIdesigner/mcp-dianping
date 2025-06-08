@@ -1,0 +1,6 @@
+# Core dependencies
+fastmcp>=0.1.0
+playwright>=1.40.0
+
+# Optional dependencies
+pytest>=7.4.0  # For testing

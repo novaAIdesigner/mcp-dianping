@@ -132,6 +132,29 @@ def get_page(url: str = 'https://www.dianping.com/beijing'):
     except Exception as e:
         return None, None
 
+def star_class_to_rating(star_classes: str) -> str:
+    """Convert star class string to numeric rating
+    
+    Args:
+        star_classes: Class string like 'star star_40 star_sml'
+        
+    Returns:
+        String rating like '4.0' or '4.5'
+    """
+    if not star_classes:
+        return "0"
+    try:
+        # Find the class that starts with 'star_' and contains numbers
+        classes = star_classes.split()
+        rating_class = next((c for c in classes if c.startswith('star_') and c[5:].isdigit()), None)
+        if rating_class:
+            num = int(rating_class.replace('star_', ''))
+            rating = num / 10
+            return str(rating)
+        return "0"
+    except:
+        return "0"
+
 # Update tool functions to use get_page()
 @mcp.tool()
 def dianping_category_rank(city: str, category: str, region: str = "", sort: str = "") -> dict:
@@ -193,7 +216,8 @@ def dianping_category_rank(city: str, category: str, region: str = "", sort: str
     
     try:
         try:
-            page.wait_for_selector('.shop-all-list', timeout=10000)
+            page.wait_for_load_state('domcontentloaded')
+            #page.wait_for_selector('.shop-all-list', timeout=10000)
         except Exception:
             page.close()
             return {"success": False, "error": "页面加载失败或需要登录"}
@@ -209,15 +233,15 @@ def dianping_category_rank(city: str, category: str, region: str = "", sort: str
                     if idx + 1 < len(parts):
                         shop_id = parts[idx + 1]
             star = shop.query_selector('.nebula_star .star_icon span')
-            rating = star.get_attribute('class') if star else ""
+            rating = star_class_to_rating(star.get_attribute('class')) if star else "0"
             review_count = shop.query_selector('.review-num b').inner_text() if shop.query_selector('.review-num b') else ""
             address = ""
             addr_tag = shop.query_selector('.tag-addr')
             if addr_tag:
                 addr_spans = addr_tag.query_selector_all('a span.tag')
                 address = " ".join([span.inner_text() for span in addr_spans]) if addr_spans else ""
-            img = shop.query_selector('.pic img')
-            img_url = img.get_attribute('src') if img else ""
+            #img = shop.query_selector('.pic img')
+            #img_url = img.get_attribute('src') if img else ""
             price = shop.query_selector('.mean-price b').inner_text() if shop.query_selector('.mean-price b') else ""
             recommend = []
             recommend_tag = shop.query_selector('.recommend')
@@ -227,11 +251,9 @@ def dianping_category_rank(city: str, category: str, region: str = "", sort: str
             items.append({
                 "shop_id": shop_id,
                 "name": name,
-                "rating": rating,
+                "rating": rating,  # Now contains numeric rating like "4.5"
                 "review_count": review_count,
                 "address": address,
-                "url": f"https://www.dianping.com{href}" if href and href.startswith('/') else href,
-                "img": img_url,
                 "price": price,
                 "recommend": recommend
             })
@@ -336,11 +358,4 @@ def dianping_shop_detail(shop_id: str) -> dict:
         page.close()
 
 if __name__ == "__main__":
-    # Check login status on startup
-    context, page = get_page()
-    if page:
-        print("Authentication verified successfully")
-        page.close()
-    else:
-        print("Error: 需要登录并上传auth.json")
     mcp.run(transport="stdio")
